@@ -1,0 +1,142 @@
+service: api-usuarios-tenants
+
+provider:
+  name: aws
+  runtime: python3.13
+  memorySize: 1024
+  timeout: 20
+  iam:
+    role: arn:aws:iam::246946388956:role/LabRole
+  environment:
+    TABLE_TENANTS: ${sls:stage}-t_tenants-proy
+    TABLE_USUARIOS: ${sls:stage}-t_usuarios-proy
+    TABLE_TENANTS_LOCKS: ${sls:stage}-t_tenants_locks-proy
+    INDEX_NOMBRE: nombre_normalizado-index
+    SNS_TOPIC_ARN: !Ref EventosCrmTopic
+
+functions:
+  # Lambda Authorizer para validar tokens
+  authorizerFunc:
+    handler: Authorizer.lambda_handler
+
+  # 1. POST /tenants (Público)
+  crearTenant:
+    handler: CrearTenant.lambda_handler
+    events:
+      - http:
+          path: /tenants
+          method: post
+          cors: true
+
+  # 2. POST /usuarios/login (Público)
+  loginUsuario:
+    handler: LoginUsuario.lambda_handler
+    events:
+      - http:
+          path: /usuarios/login
+          method: post
+          cors: true
+
+  # 3. POST /usuarios (Protegido - solo admin)
+  crearUsuario:
+    handler: CrearUsuario.lambda_handler
+    events:
+      - http:
+          path: /usuarios
+          method: post
+          cors: true
+          authorizer:
+            name: authorizerFunc
+            resultTtlInSeconds: 0
+
+  # 4. GET /usuarios (Protegido)
+  listarUsuarios:
+    handler: ListarUsuarios.lambda_handler
+    events:
+      - http:
+          path: /usuarios
+          method: get
+          cors: true
+          authorizer:
+            name: authorizerFunc
+            resultTtlInSeconds: 0
+
+  # 5. PUT /usuarios/{usuario_id} (Protegido - solo admin)
+  actualizarUsuario:
+    handler: ActualizarUsuario.lambda_handler
+    events:
+      - http:
+          path: /usuarios/{usuario_id}
+          method: put
+          cors: true
+          authorizer:
+            name: authorizerFunc
+            resultTtlInSeconds: 0
+
+resources:
+  Resources:
+    # Tabla 1: Tenants (con GSI para verificar nombre de empresa duplicado)
+    TablaTenants:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.TABLE_TENANTS}
+        AttributeDefinitions:
+          - AttributeName: tenant_id
+            AttributeType: S
+          - AttributeName: nombre_normalizado
+            AttributeType: S
+        KeySchema:
+          - AttributeName: tenant_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: ${self:provider.environment.INDEX_NOMBRE}
+            KeySchema:
+              - AttributeName: nombre_normalizado
+                KeyType: HASH
+            Projection:
+              ProjectionType: KEYS_ONLY
+        BillingMode: PAY_PER_REQUEST
+
+    # Tabla 1b: Candados de nombre de empresa (evita registros simultáneos duplicados)
+    TablaTenantsLocks:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.TABLE_TENANTS_LOCKS}
+        AttributeDefinitions:
+          - AttributeName: nombre_normalizado
+            AttributeType: S
+        KeySchema:
+          - AttributeName: nombre_normalizado
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+
+    # Tabla 2: Usuarios (con GSI para búsqueda por correo en el Login)
+    TablaUsuarios:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.TABLE_USUARIOS}
+        AttributeDefinitions:
+          - AttributeName: tenant_id
+            AttributeType: S
+          - AttributeName: usuario_id
+            AttributeType: S
+          - AttributeName: correo
+            AttributeType: S
+        KeySchema:
+          - AttributeName: tenant_id
+            KeyType: HASH
+          - AttributeName: usuario_id
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: correo-index
+            KeySchema:
+              - AttributeName: correo
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+    
+    EventosCrmTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${sls:stage}-eventos-crm-topic
